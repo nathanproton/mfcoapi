@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Bucket {{ bucket }}</title>
+    <!-- Google Font: Futura (fallback if unavailable) -->
+    <link href="https://fonts.googleapis.com/css2?family=Futura:wght@400;700&display=swap" rel="stylesheet" />
+    <style>
+        body { margin: 0; font-family: 'Futura', Arial, sans-serif; }
+        .topbar {
+            background-color: #111;
+            color: #ffffff;
+            padding: 1rem 2rem;
+            text-align: center;
+        }
+        .topbar h1 {
+            margin: 0;
+            font-size: 2rem;
+            letter-spacing: 2px;
+        }
+        .topbar h2 {
+            margin: 0;
+            font-size: 0.9rem;
+            font-weight: normal;
+            letter-spacing: 3px;
+            color: #dddddd;
+        }
+        main { padding: 2rem; }
+        table { border-collapse: collapse; width: 100%; font-family: 'TX02', sans-serif; }
+        th, td { border: 1px solid #ccc; padding: 0.5rem; text-align: left; font-family: inherit; }
+        th { background-color: #f5f5f5; }
+        a { color: #1e88e5; text-decoration: none; }
+        a:hover { text-decoration: underline; }
+        /* Custom font for table text */
+        @font-face {
+            font-family: 'TX02';
+            src: url('/static/fonts/TX-02-Regular.woff2') format('woff2');
+            font-weight: normal;
+            font-style: normal;
+            font-display: swap;
+        }
+        /* Breadcrumbs use TX02 font */
+        nav { font-family: 'TX02', sans-serif; }
+
+        /* Clickable row styles */
+        tr.click-row { transition: background-color 0.15s ease-in-out; }
+        tr.click-row:hover { background-color: #e3f2fd; cursor: pointer; }
+    </style>
+</head>
+<body>
+    <header class="topbar">
+        <h1>LONGLINES</h1>
+        <h2>MORNINGSIDE FOUNDRY CO.</h2>
+    </header>
+    <main>
+
+        <!-- Breadcrumbs -->
+        <nav style="margin-bottom:1rem;">
+            {% for name, url in breadcrumbs %}
+                {% if url %}
+                    <a href="{{ url }}">{{ name }}</a>
+                {% else %}
+                    <span>{{ name }}</span>
+                {% endif %}
+                {% if not loop.last %} / {% endif %}
+            {% endfor %}
+        </nav>
+
+        {% if folders or files %}
+        <table>
+            <thead>
+                <tr>
+                    <th>Name</th>
+                    <th>Size</th>
+                    <th>Last Modified</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                <!-- Folders -->
+                {% for folder in folders %}
+                <tr class="click-row" data-href="/browse/{{ folder.prefix }}">
+                    <td>
+                        {{ folder.name }}/
+                    </td>
+                    <td>—</td>
+                    <td>—</td>
+                    <td></td>
+                </tr>
+                {% endfor %}
+
+                <!-- Files -->
+                {% for obj in files %}
+                <tr class="click-row" data-href="/sign-url/{{ obj.Key }}">
+                    <td>
+                        {{ obj.display_name }}
+                    </td>
+                    <td>{{ obj.Size | human_size }}</td>
+                    <td>{{ obj.LastModified | human_date }}</td>
+                    <td>
+                        <a href="/sign-url/{{ obj.Key }}" target="_blank">Download</a>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+            <p>No objects found in this location.</p>
+        {% endif %}
+    </main>
+    <script>
+        function attachRowHandlers() {
+            document.querySelectorAll('tr.click-row').forEach(row => {
+                row.addEventListener('click', (ev) => {
+                    const href = row.getAttribute('data-href');
+                    if (!href) return;
+                    if (href.startsWith('/browse/')) {
+                        ev.preventDefault();
+                        ajaxNavigate(href);
+                    } else {
+                        window.open(href, '_blank');
+                    }
+                });
+            });
+        }
+
+        function ajaxNavigate(url) {
+            fetch(url)
+                .then(r => r.text())
+                .then(html => {
+                    const parser = new DOMParser();
+                    const doc = parser.parseFromString(html, 'text/html');
+                    const newMain = doc.querySelector('main');
+                    if (newMain) {
+                        document.querySelector('main').innerHTML = newMain.innerHTML;
+                        history.pushState(null, '', url);
+                        attachRowHandlers();
+                    }
+                })
+                .catch(console.error);
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            attachRowHandlers();
+            // Intercept breadcrumb link clicks
+            document.addEventListener('click', (e) => {
+                const anchor = e.target.closest('a');
+                if (anchor && anchor.getAttribute('href') && anchor.getAttribute('href').startsWith('/browse/')) {
+                    e.preventDefault();
+                    ajaxNavigate(anchor.getAttribute('href'));
+                }
+            });
+
+            window.addEventListener('popstate', () => {
+                ajaxNavigate(location.pathname);
+            });
+        });
+    </script>
+</body>
+</html> 
