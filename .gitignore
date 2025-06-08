@@ -6,6 +6,10 @@
 # Dependencies
 node_modules/
 vendor/
+venv/
+.venv/
+env/
+ENV/
 
 # IDE files
 .idea/
