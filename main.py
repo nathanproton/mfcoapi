@@ -5,6 +5,8 @@ import os
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Tuple
+import secrets
+import string
 
 import boto3
 from botocore.config import Config
@@ -40,6 +42,7 @@ DATA_DIR = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
 SNAPSHOT_FILE = DATA_DIR / "snapshot.json"
 CHANGELOG_FILE = DATA_DIR / "changelog.jsonl"
+PERMANENT_URI_MAP_FILE = DATA_DIR / "permanent_uri_map.json"
 
 # Init FastAPI
 app = FastAPI(title="DO Spaces Browser")
@@ -83,6 +86,83 @@ templates.env.filters["human_size"] = human_size
 templates.env.filters["human_date"] = human_date
 
 
+def generate_nanoid(length: int = 21) -> str:
+    """Generate a nanoid-like string using URL-safe characters."""
+    alphabet = string.ascii_letters + string.digits + "-_"
+    return ''.join(secrets.choice(alphabet) for _ in range(length))
+
+
+def load_permanent_uri_map() -> Dict[str, str]:
+    """Load the permanent URI map (id -> s3_key)."""
+    if PERMANENT_URI_MAP_FILE.exists():
+        return json.loads(PERMANENT_URI_MAP_FILE.read_text())
+    return {}
+
+
+def save_permanent_uri_map(uri_map: Dict[str, str]):
+    """Save the permanent URI map."""
+    PERMANENT_URI_MAP_FILE.write_text(json.dumps(uri_map, indent=2))
+
+
+def get_permanent_uri_for_key(s3_key: str, uri_map: Dict[str, str]) -> str:
+    """Get or create a permanent URI ID for an S3 key."""
+    # Check if this key already has an ID
+    for uri_id, key in uri_map.items():
+        if key == s3_key:
+            return uri_id
+    
+    # Generate new ID
+    new_id = generate_nanoid()
+    # Ensure uniqueness (very unlikely collision with 21 chars)
+    while new_id in uri_map:
+        new_id = generate_nanoid()
+    
+    uri_map[new_id] = s3_key
+    return new_id
+
+
+def update_permanent_uri_mappings(old_snapshot: Dict[str, Dict], new_snapshot: Dict[str, Dict], uri_map: Dict[str, str]):
+    """Update permanent URI mappings when files are moved/renamed."""
+    changes_made = False
+    
+    # Handle moved files by comparing ETags
+    old_etags = {obj["ETag"]: key for key, obj in old_snapshot.items()}
+    new_etags = {obj["ETag"]: key for key, obj in new_snapshot.items()}
+    
+    # Find files that were moved (same ETag, different key)
+    for etag, old_key in old_etags.items():
+        if etag in new_etags:
+            new_key = new_etags[etag]
+            if old_key != new_key:
+                # File was moved - update the mapping
+                for uri_id, mapped_key in uri_map.items():
+                    if mapped_key == old_key:
+                        uri_map[uri_id] = new_key
+                        changes_made = True
+                        logger.info(f"Updated permanent URI mapping: {uri_id} now points to {new_key} (was {old_key})")
+                        break
+    
+    # Remove mappings for deleted files
+    deleted_keys = set(old_snapshot.keys()) - set(new_snapshot.keys())
+    for uri_id, key in list(uri_map.items()):
+        if key in deleted_keys:
+            # Check if this file was actually deleted (not just moved)
+            if key not in [obj["Key"] for obj in new_snapshot.values()]:
+                old_etag = old_snapshot.get(key, {}).get("ETag")
+                if old_etag and old_etag not in new_etags:
+                    del uri_map[uri_id]
+                    changes_made = True
+                    logger.info(f"Removed permanent URI mapping for deleted file: {uri_id} -> {key}")
+    
+    # Add mappings for new files
+    for key in new_snapshot.keys():
+        if key not in old_snapshot:
+            get_permanent_uri_for_key(key, uri_map)
+            changes_made = True
+    
+    return changes_made
+
+
 def list_prefix(prefix: str = "") -> Tuple[List[Dict], List[Dict]]:
     """Return (folders, files) under the given prefix."""
     if prefix and not prefix.endswith("/"):
@@ -100,6 +180,12 @@ def list_prefix(prefix: str = "") -> Tuple[List[Dict], List[Dict]]:
             if obj["Key"] == prefix:
                 # This is the directory marker itself, skip
                 continue
+            
+            # Skip .DS_Store files (case insensitive)
+            key_lower = obj["Key"].lower()
+            if key_lower.endswith("/.ds_store") or key_lower == ".ds_store":
+                continue
+            
             obj["display_name"] = obj["Key"][len(prefix):]
             obj["LastModified"] = obj["LastModified"].isoformat()
             files.append(obj)
@@ -199,6 +285,16 @@ async def root(request: Request):
 async def browse(request: Request, prefix: str = ""):
     folders, files = list_prefix(prefix)
     breadcrumbs = build_breadcrumbs(prefix)
+    
+    # Add permanent URI IDs to files
+    uri_map = load_permanent_uri_map()
+    for file_obj in files:
+        s3_key = file_obj["Key"]
+        file_obj["permanent_uri_id"] = get_permanent_uri_for_key(s3_key, uri_map)
+    
+    # Save updated URI map if new IDs were created
+    save_permanent_uri_map(uri_map)
+    
     return templates.TemplateResponse(
         "index.html",
         {
@@ -225,6 +321,39 @@ async def sign_url(key: str, expires_in: int = 3600):
         raise HTTPException(status_code=500, detail="Failed to generate presigned URL") from e
     return RedirectResponse(url)
 
+
+@app.get("/file/{uri_id}")
+async def get_file_by_permanent_uri(uri_id: str, expires_in: int = 3600):
+    """Serve a file by its permanent URI ID."""
+    uri_map = load_permanent_uri_map()
+    
+    if uri_id not in uri_map:
+        raise HTTPException(status_code=404, detail="Permanent URI not found")
+    
+    s3_key = uri_map[uri_id]
+    
+    try:
+        # Check if file still exists
+        s3.head_object(Bucket=DO_BUCKET, Key=s3_key)
+        
+        # Generate presigned URL and redirect
+        url = s3.generate_presigned_url(
+            ClientMethod="get_object",
+            Params={"Bucket": DO_BUCKET, "Key": s3_key},
+            ExpiresIn=expires_in,
+        )
+        return RedirectResponse(url)
+    except s3.exceptions.NoSuchKey:
+        # File no longer exists, remove from mapping
+        uri_map = load_permanent_uri_map()
+        if uri_id in uri_map:
+            del uri_map[uri_id]
+            save_permanent_uri_map(uri_map)
+        raise HTTPException(status_code=404, detail="File no longer exists")
+    except Exception as e:
+        logger.exception("Failed generating presigned URL for permanent URI %s -> %s", uri_id, s3_key)
+        raise HTTPException(status_code=500, detail="Failed to generate presigned URL") from e
+
 # ---------------------------------------------------------------------------
 # Background bucket monitor
 # ---------------------------------------------------------------------------
@@ -243,9 +372,19 @@ async def bucket_monitor(interval: int = 60):
             snapshot = {obj["Key"]: obj for obj in all_files}
             previous = load_snapshot()
             changes = diff_snapshots(previous, snapshot)
+            
+            # Update permanent URI mappings
+            uri_map = load_permanent_uri_map()
+            mappings_changed = update_permanent_uri_mappings(previous, snapshot, uri_map)
+            
             if changes:
                 append_changelog(changes)
                 save_snapshot(snapshot)
+            
+            if mappings_changed:
+                save_permanent_uri_map(uri_map)
+                logger.info("Updated permanent URI mappings")
+                
         except Exception:
             logger.exception("Error while monitoring bucket")
         await asyncio.sleep(interval)

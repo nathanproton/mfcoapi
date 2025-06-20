@@ -4,6 +4,8 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Bucket {{ bucket }}</title>
+    <!-- Favicon -->
+    <link rel="icon" type="image/png" href="/static/images/ll-icon.png" />
     <!-- Google Font: Futura (fallback if unavailable) -->
     <link href="https://fonts.googleapis.com/css2?family=Futura:wght@400;700&display=swap" rel="stylesheet" />
     <style>
@@ -99,7 +101,10 @@
                     <td>{{ obj.Size | human_size }}</td>
                     <td>{{ obj.LastModified | human_date }}</td>
                     <td>
-                        <a href="/sign-url/{{ obj.Key }}" target="_blank">Download</a>
+                        <a href="/sign-url/{{ obj.Key }}" target="_blank" onclick="event.stopPropagation()">Download</a>
+                        {% if obj.permanent_uri_id %}
+                         | <a href="javascript:void(0)" onclick="event.stopPropagation(); copyPermanentURI('{{ obj.permanent_uri_id }}', this)">Copy URI</a>
+                        {% endif %}
                     </td>
                 </tr>
                 {% endfor %}
@@ -110,6 +115,63 @@
         {% endif %}
     </main>
     <script>
+        function copyPermanentURI(uriId, linkElement) {
+            console.log('copyPermanentURI called with:', uriId);
+            const permanentURI = `${window.location.origin}/file/${uriId}`;
+            console.log('Copying URI:', permanentURI);
+            
+            navigator.clipboard.writeText(permanentURI).then(() => {
+                // Visual feedback
+                const originalText = linkElement.textContent;
+                linkElement.textContent = 'Copied!';
+                linkElement.style.color = '#4caf50';
+                
+                setTimeout(() => {
+                    linkElement.textContent = originalText;
+                    linkElement.style.color = '';
+                }, 2000);
+            }).catch(err => {
+                console.error('Failed to copy: ', err);
+                // Fallback for older browsers
+                const textArea = document.createElement('textarea');
+                textArea.value = permanentURI;
+                document.body.appendChild(textArea);
+                textArea.select();
+                try {
+                    document.execCommand('copy');
+                    const originalText = linkElement.textContent;
+                    linkElement.textContent = 'Copied!';
+                    linkElement.style.color = '#4caf50';
+                    
+                    setTimeout(() => {
+                        linkElement.textContent = originalText;
+                        linkElement.style.color = '';
+                    }, 2000);
+                } catch (err) {
+                    console.error('Fallback copy failed: ', err);
+                    alert('Failed to copy URI to clipboard');
+                }
+                document.body.removeChild(textArea);
+            });
+        }
+
+        // Make sure the function is globally available
+        window.copyPermanentURI = copyPermanentURI;
+
+        function hideDSStoreFiles() {
+            // Find and hide any rows containing .ds-store files (case insensitive)
+            document.querySelectorAll('tr').forEach(row => {
+                const nameCell = row.querySelector('td:first-child');
+                if (nameCell) {
+                    const fileName = nameCell.textContent.trim().toLowerCase();
+                    if (fileName.includes('.ds-store')) {
+                        row.style.display = 'none';
+                        console.log('Hidden .ds-store file:', fileName);
+                    }
+                }
+            });
+        }
+
         function attachRowHandlers() {
             document.querySelectorAll('tr.click-row').forEach(row => {
                 row.addEventListener('click', (ev) => {
@@ -136,6 +198,7 @@
                         document.querySelector('main').innerHTML = newMain.innerHTML;
                         history.pushState(null, '', url);
                         attachRowHandlers();
+                        hideDSStoreFiles();
                     }
                 })
                 .catch(console.error);
@@ -143,6 +206,7 @@
 
         document.addEventListener('DOMContentLoaded', () => {
             attachRowHandlers();
+            hideDSStoreFiles();
             // Intercept breadcrumb link clicks
             document.addEventListener('click', (e) => {
                 const anchor = e.target.closest('a');
