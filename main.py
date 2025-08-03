@@ -40,9 +40,7 @@ logger = logging.getLogger(__name__)
 # Directories & paths
 DATA_DIR = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
-SNAPSHOT_FILE = DATA_DIR / "snapshot.json"
-CHANGELOG_FILE = DATA_DIR / "changelog.jsonl"
-PERMANENT_URI_MAP_FILE = DATA_DIR / "permanent_uri_map.json"
+URI_MAP_FILE = DATA_DIR / "uri.json"
 
 # Init FastAPI
 app = FastAPI(title="DO Spaces Browser")
@@ -92,26 +90,26 @@ def generate_nanoid(length: int = 21) -> str:
     return ''.join(secrets.choice(alphabet) for _ in range(length))
 
 
-def load_permanent_uri_map() -> Dict[str, str]:
-    """Load the permanent URI map (id -> s3_key)."""
-    if PERMANENT_URI_MAP_FILE.exists():
-        return json.loads(PERMANENT_URI_MAP_FILE.read_text())
+def load_uri_map() -> Dict[str, str]:
+    """Load the URI map (id -> s3_key)."""
+    if URI_MAP_FILE.exists():
+        return json.loads(URI_MAP_FILE.read_text())
     return {}
 
 
-def save_permanent_uri_map(uri_map: Dict[str, str]):
-    """Save the permanent URI map."""
-    PERMANENT_URI_MAP_FILE.write_text(json.dumps(uri_map, indent=2))
+def save_uri_map(uri_map: Dict[str, str]):
+    """Save the URI map."""
+    URI_MAP_FILE.write_text(json.dumps(uri_map, indent=2))
 
 
-def get_permanent_uri_for_key(s3_key: str, uri_map: Dict[str, str]) -> str:
-    """Get or create a permanent URI ID for an S3 key."""
+def get_uri_for_key(s3_key: str, uri_map: Dict[str, str]) -> str:
+    """Get or create a URI ID for an S3 key (only creates if doesn't exist)."""
     # Check if this key already has an ID
     for uri_id, key in uri_map.items():
         if key == s3_key:
             return uri_id
     
-    # Generate new ID
+    # Generate new ID only if key doesn't exist
     new_id = generate_nanoid()
     # Ensure uniqueness (very unlikely collision with 21 chars)
     while new_id in uri_map:
@@ -121,44 +119,28 @@ def get_permanent_uri_for_key(s3_key: str, uri_map: Dict[str, str]) -> str:
     return new_id
 
 
-def update_permanent_uri_mappings(old_snapshot: Dict[str, Dict], new_snapshot: Dict[str, Dict], uri_map: Dict[str, str]):
-    """Update permanent URI mappings when files are moved/renamed."""
+def add_uris_for_new_files(all_files: List[Dict], uri_map: Dict[str, str]) -> bool:
+    """Add URI mappings for any new files that don't already have them."""
     changes_made = False
+    existing_keys = set(uri_map.values())
     
-    # Handle moved files by comparing ETags
-    old_etags = {obj["ETag"]: key for key, obj in old_snapshot.items()}
-    new_etags = {obj["ETag"]: key for key, obj in new_snapshot.items()}
-    
-    # Find files that were moved (same ETag, different key)
-    for etag, old_key in old_etags.items():
-        if etag in new_etags:
-            new_key = new_etags[etag]
-            if old_key != new_key:
-                # File was moved - update the mapping
-                for uri_id, mapped_key in uri_map.items():
-                    if mapped_key == old_key:
-                        uri_map[uri_id] = new_key
-                        changes_made = True
-                        logger.info(f"Updated permanent URI mapping: {uri_id} now points to {new_key} (was {old_key})")
-                        break
-    
-    # Remove mappings for deleted files
-    deleted_keys = set(old_snapshot.keys()) - set(new_snapshot.keys())
-    for uri_id, key in list(uri_map.items()):
-        if key in deleted_keys:
-            # Check if this file was actually deleted (not just moved)
-            if key not in [obj["Key"] for obj in new_snapshot.values()]:
-                old_etag = old_snapshot.get(key, {}).get("ETag")
-                if old_etag and old_etag not in new_etags:
-                    del uri_map[uri_id]
-                    changes_made = True
-                    logger.info(f"Removed permanent URI mapping for deleted file: {uri_id} -> {key}")
-    
-    # Add mappings for new files
-    for key in new_snapshot.keys():
-        if key not in old_snapshot:
-            get_permanent_uri_for_key(key, uri_map)
+    for file_obj in all_files:
+        s3_key = file_obj["Key"]
+        
+        # Skip .DS_Store files (case insensitive)
+        key_lower = s3_key.lower()
+        if key_lower.endswith("/.ds_store") or key_lower == ".ds_store":
+            continue
+            
+        # Skip directory markers
+        if s3_key.endswith("/"):
+            continue
+            
+        # Only add URI if this file doesn't already have one
+        if s3_key not in existing_keys:
+            get_uri_for_key(s3_key, uri_map)
             changes_made = True
+            logger.info(f"Added new URI mapping for: {s3_key}")
     
     return changes_made
 
@@ -233,42 +215,7 @@ def build_breadcrumbs(prefix: str) -> List[Tuple[str, str | None]]:
     return crumbs
 
 
-def diff_snapshots(old: Dict[str, Dict], new: Dict[str, Dict]):
-    """Generate a diff between two object maps (key->metadata)."""
-    changes = []
-    old_keys, new_keys = set(old.keys()), set(new.keys())
 
-    added = new_keys - old_keys
-    deleted = old_keys - new_keys
-    possible_modified = old_keys & new_keys
-
-    for key in added:
-        changes.append({"action": "added", "key": key, "time": datetime.utcnow().isoformat()})
-    for key in deleted:
-        changes.append({"action": "deleted", "key": key, "time": datetime.utcnow().isoformat()})
-    for key in possible_modified:
-        if old[key]["ETag"] != new[key]["ETag"] or old[key]["Size"] != new[key]["Size"]:
-            changes.append({"action": "modified", "key": key, "time": datetime.utcnow().isoformat()})
-    return changes
-
-
-def load_snapshot() -> Dict[str, Dict]:
-    if SNAPSHOT_FILE.exists():
-        return json.loads(SNAPSHOT_FILE.read_text())
-    return {}
-
-
-def save_snapshot(snapshot: Dict[str, Dict]):
-    SNAPSHOT_FILE.write_text(json.dumps(snapshot))
-
-
-def append_changelog(changes: List[Dict]):
-    if not changes:
-        return
-    with CHANGELOG_FILE.open("a") as f:
-        for entry in changes:
-            f.write(json.dumps(entry) + "\n")
-    logger.info("Recorded %d change(s) to %s", len(changes), CHANGELOG_FILE)
 
 # ---------------------------------------------------------------------------
 # Routes (updated)
@@ -286,14 +233,14 @@ async def browse(request: Request, prefix: str = ""):
     folders, files = list_prefix(prefix)
     breadcrumbs = build_breadcrumbs(prefix)
     
-    # Add permanent URI IDs to files
-    uri_map = load_permanent_uri_map()
+    # Add URI IDs to files
+    uri_map = load_uri_map()
     for file_obj in files:
         s3_key = file_obj["Key"]
-        file_obj["permanent_uri_id"] = get_permanent_uri_for_key(s3_key, uri_map)
+        file_obj["permanent_uri_id"] = get_uri_for_key(s3_key, uri_map)
     
     # Save updated URI map if new IDs were created
-    save_permanent_uri_map(uri_map)
+    save_uri_map(uri_map)
     
     return templates.TemplateResponse(
         "index.html",
@@ -324,11 +271,11 @@ async def sign_url(key: str, expires_in: int = 3600):
 
 @app.get("/file/{uri_id}")
 async def get_file_by_permanent_uri(uri_id: str, expires_in: int = 3600):
-    """Serve a file by its permanent URI ID."""
-    uri_map = load_permanent_uri_map()
+    """Serve a file by its URI ID."""
+    uri_map = load_uri_map()
     
     if uri_id not in uri_map:
-        raise HTTPException(status_code=404, detail="Permanent URI not found")
+        raise HTTPException(status_code=404, detail="URI not found")
     
     s3_key = uri_map[uri_id]
     
@@ -345,13 +292,13 @@ async def get_file_by_permanent_uri(uri_id: str, expires_in: int = 3600):
         return RedirectResponse(url)
     except s3.exceptions.NoSuchKey:
         # File no longer exists, remove from mapping
-        uri_map = load_permanent_uri_map()
+        uri_map = load_uri_map()
         if uri_id in uri_map:
             del uri_map[uri_id]
-            save_permanent_uri_map(uri_map)
+            save_uri_map(uri_map)
         raise HTTPException(status_code=404, detail="File no longer exists")
     except Exception as e:
-        logger.exception("Failed generating presigned URL for permanent URI %s -> %s", uri_id, s3_key)
+        logger.exception("Failed generating presigned URL for URI %s -> %s", uri_id, s3_key)
         raise HTTPException(status_code=500, detail="Failed to generate presigned URL") from e
 
 # ---------------------------------------------------------------------------
@@ -359,41 +306,88 @@ async def get_file_by_permanent_uri(uri_id: str, expires_in: int = 3600):
 # ---------------------------------------------------------------------------
 
 
-async def bucket_monitor(interval: int = 60):
-    """Periodically poll the bucket and update changelog."""
-    logger.info("Starting bucket monitor with %d s interval", interval)
+async def bucket_uri_indexer(interval: int = 3600):  # 1 hour = 3600 seconds
+    """Periodically scan bucket and add URI mappings for new files."""
+    logger.info("Starting URI indexer with %d s interval (hourly)", interval)
     while True:
         try:
-            # Monitor the entire bucket (flat list)
+            logger.info("Running hourly URI indexing...")
+            # Get all files from bucket
             all_files: List[Dict] = []
             paginator = s3.get_paginator("list_objects_v2")
             for page in paginator.paginate(Bucket=DO_BUCKET):
                 all_files.extend(page.get("Contents", []))
-            snapshot = {obj["Key"]: obj for obj in all_files}
-            previous = load_snapshot()
-            changes = diff_snapshots(previous, snapshot)
             
-            # Update permanent URI mappings
-            uri_map = load_permanent_uri_map()
-            mappings_changed = update_permanent_uri_mappings(previous, snapshot, uri_map)
+            # Load current URI map and add mappings for new files
+            uri_map = load_uri_map()
+            changes_made = add_uris_for_new_files(all_files, uri_map)
             
-            if changes:
-                append_changelog(changes)
-                save_snapshot(snapshot)
-            
-            if mappings_changed:
-                save_permanent_uri_map(uri_map)
-                logger.info("Updated permanent URI mappings")
+            if changes_made:
+                save_uri_map(uri_map)
+                logger.info("Updated URI mappings during hourly scan")
+            else:
+                logger.info("No new files found during hourly scan")
                 
         except Exception:
-            logger.exception("Error while monitoring bucket")
+            logger.exception("Error during URI indexing")
         await asyncio.sleep(interval)
+
+
+def index_new_files() -> Dict[str, int]:
+    """Manually scan for new files and add URI mappings. Returns stats."""
+    try:
+        logger.info("Manual indexing started...")
+        
+        # Get all files from bucket
+        all_files: List[Dict] = []
+        paginator = s3.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=DO_BUCKET):
+            all_files.extend(page.get("Contents", []))
+        
+        # Load current URI map and add mappings for new files
+        uri_map = load_uri_map()
+        initial_count = len(uri_map)
+        changes_made = add_uris_for_new_files(all_files, uri_map)
+        
+        if changes_made:
+            save_uri_map(uri_map)
+        
+        final_count = len(uri_map)
+        new_files = final_count - initial_count
+        
+        logger.info(f"Manual indexing completed. Added {new_files} new URI mappings")
+        
+        return {
+            "total_files_scanned": len(all_files),
+            "existing_uris": initial_count,
+            "new_uris_added": new_files,
+            "total_uris": final_count
+        }
+        
+    except Exception as e:
+        logger.exception("Error during manual indexing")
+        raise e
+
+
+@app.post("/index-new")
+async def index_new_route():
+    """Manually trigger indexing of new files."""
+    try:
+        stats = index_new_files()
+        return {
+            "success": True,
+            "message": f"Indexing completed. Added {stats['new_uris_added']} new URI mappings.",
+            "stats": stats
+        }
+    except Exception as e:
+        logger.exception("Manual indexing failed")
+        raise HTTPException(status_code=500, detail=f"Indexing failed: {str(e)}")
 
 
 @app.on_event("startup")
 async def startup_event():
-    # Launch monitor task in background
-    asyncio.create_task(bucket_monitor())
+    # Launch hourly URI indexer in background
+    asyncio.create_task(bucket_uri_indexer())
 
 if __name__ == "__main__":
     import uvicorn
