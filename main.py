@@ -12,7 +12,7 @@ import boto3
 from botocore.config import Config
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 
@@ -23,13 +23,15 @@ DO_ACCESS_KEY_ID = os.getenv("DO_ACCESS_KEY_ID")
 DO_SECRET_KEY = os.getenv("DO_SECRET_KEY")
 DO_ENDPOINT = os.getenv("DO_ENDPOINT")
 DO_BUCKET = os.getenv("DO_BUCKET")
+USER_NS_KEY = os.getenv("USER_NS_KEY")
 
-if not all([DO_ACCESS_KEY_ID, DO_SECRET_KEY, DO_ENDPOINT, DO_BUCKET]):
+if not all([DO_ACCESS_KEY_ID, DO_SECRET_KEY, DO_ENDPOINT, DO_BUCKET, USER_NS_KEY]):
     missing = [k for k, v in {
         "DO_ACCESS_KEY_ID": DO_ACCESS_KEY_ID,
         "DO_SECRET_KEY": DO_SECRET_KEY,
         "DO_ENDPOINT": DO_ENDPOINT,
         "DO_BUCKET": DO_BUCKET,
+        "USER_NS_KEY": USER_NS_KEY,
     }.items() if not v]
     raise RuntimeError(f"Missing required env vars: {', '.join(missing)}")
 
@@ -301,6 +303,185 @@ async def get_file_by_permanent_uri(uri_id: str, expires_in: int = 3600):
         logger.exception("Failed generating presigned URL for URI %s -> %s", uri_id, s3_key)
         raise HTTPException(status_code=500, detail="Failed to generate presigned URL") from e
 
+
+@app.post("/api/validate-access-key")
+async def validate_access_key(request: Request):
+    """Validate the access key submitted by the user."""
+    try:
+        body = await request.json()
+        access_key = body.get("access_key", "").strip()
+        
+        if not access_key:
+            raise HTTPException(status_code=400, detail="Access key is required")
+        
+        if access_key == USER_NS_KEY:
+            return JSONResponse({"valid": True, "message": "Access key validated successfully"})
+        else:
+            return JSONResponse({"valid": False, "message": "Invalid access key"}, status_code=401)
+    
+    except Exception as e:
+        logger.exception("Error validating access key")
+        raise HTTPException(status_code=500, detail="Internal server error") from e
+
+
+def get_recursive_file_tree(prefix: str = "") -> List[Dict]:
+    """Get all files recursively from a given prefix."""
+    if prefix and not prefix.endswith("/"):
+        prefix += "/"
+    
+    all_files = []
+    paginator = s3.get_paginator("list_objects_v2")
+    
+    for page in paginator.paginate(Bucket=DO_BUCKET, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            # Skip directory markers and .DS_Store files
+            if obj["Key"].endswith("/"):
+                continue
+            
+            key_lower = obj["Key"].lower()
+            if key_lower.endswith("/.ds_store") or key_lower == ".ds_store":
+                continue
+            
+            # Calculate relative path from the starting prefix
+            relative_path = obj["Key"][len(prefix):] if prefix else obj["Key"]
+            file_name = relative_path.split("/")[-1]
+            
+            all_files.append({
+                "file_name": file_name,
+                "full_path": obj["Key"],
+                "relative_path": relative_path,
+                "size": obj["Size"],
+                "last_modified": obj["LastModified"].isoformat()
+            })
+    
+    return sorted(all_files, key=lambda x: x["full_path"])
+
+
+@app.get("/tree", response_class=HTMLResponse)
+@app.get("/tree/{prefix:path}", response_class=HTMLResponse)
+async def tree_view(request: Request, prefix: str = "", access_key: str = None):
+    """Generate a tree view of all files in the current directory and subdirectories. Requires authentication."""
+    # Check authentication via header or query parameter
+    auth_header = request.headers.get("X-Access-Key")
+    auth_param = access_key
+    
+    if (not auth_header or auth_header != USER_NS_KEY) and (not auth_param or auth_param != USER_NS_KEY):
+        raise HTTPException(status_code=401, detail="Authentication required")
+    
+    files = get_recursive_file_tree(prefix)
+    
+    # Add URI IDs to files using the new function
+    uri_map = load_uri_map()
+    for file_obj in files:
+        s3_key = file_obj["full_path"]
+        file_obj["permanent_uri_id"] = get_uri_for_key(s3_key, uri_map)
+    
+    # Save any new URI mappings that were created
+    save_uri_map(uri_map)
+    
+    # Generate HTML table
+    html_content = f"""
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>File Tree - {prefix or 'Root'}</title>
+        <style>
+            @font-face {{
+                font-family: 'TX02';
+                src: url('/static/fonts/TX-02-Regular.woff2') format('woff2');
+                font-weight: normal;
+                font-style: normal;
+                font-display: swap;
+            }}
+            body {{ 
+                margin: 20px; 
+                font-family: 'TX02', sans-serif; 
+                background-color: #f5f5f5;
+            }}
+            h1 {{ 
+                color: #333; 
+                margin-bottom: 20px;
+                font-family: 'TX02', sans-serif;
+            }}
+            table {{ 
+                border-collapse: collapse; 
+                width: 100%; 
+                background-color: white;
+                box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+            }}
+            th, td {{ 
+                border: 1px solid #ddd; 
+                padding: 8px 12px; 
+                text-align: left; 
+                font-family: 'TX02', sans-serif;
+            }}
+            th {{ 
+                background-color: #f8f9fa; 
+                font-weight: bold;
+                position: sticky;
+                top: 0;
+            }}
+            tr:nth-child(even) {{ 
+                background-color: #f9f9f9; 
+            }}
+            tr:hover {{ 
+                background-color: #e3f2fd; 
+            }}
+            a {{ 
+                color: #104BC4; 
+                text-decoration: none; 
+            }}
+            a:hover {{ 
+                text-decoration: underline; 
+            }}
+            .path-cell {{
+                font-family: monospace;
+                font-size: 0.9em;
+                color: #666;
+            }}
+        </style>
+    </head>
+    <body>
+        <h1>File Tree: {prefix or 'Root Directory'}</h1>
+        <p style="color: #666; margin-bottom: 20px;">Total files: {len(files)}</p>
+        
+        <table>
+            <thead>
+                <tr>
+                    <th>File Name</th>
+                    <th>Path</th>
+                    <th>Permanent URI</th>
+                </tr>
+            </thead>
+            <tbody>
+    """
+    
+    for file_obj in files:
+        permanent_uri = ""
+        if file_obj["permanent_uri_id"]:
+            permanent_uri = f'<a href="https://mfcoapi.com/file/{file_obj["permanent_uri_id"]}" target="_blank">https://mfcoapi.com/file/{file_obj["permanent_uri_id"]}</a>'
+        else:
+            permanent_uri = '<span style="color: #999; font-style: italic;">URI pending</span>'
+        
+        html_content += f"""
+                <tr>
+                    <td>{file_obj["file_name"]}</td>
+                    <td class="path-cell">{file_obj["full_path"]}</td>
+                    <td>{permanent_uri}</td>
+                </tr>
+        """
+    
+    html_content += """
+            </tbody>
+        </table>
+    </body>
+    </html>
+    """
+    
+    return HTMLResponse(content=html_content)
+
 # ---------------------------------------------------------------------------
 # Background bucket monitor
 # ---------------------------------------------------------------------------
@@ -370,8 +551,13 @@ def index_new_files() -> Dict[str, int]:
 
 
 @app.post("/index-new")
-async def index_new_route():
-    """Manually trigger indexing of new files."""
+async def index_new_route(request: Request):
+    """Manually trigger indexing of new files. Requires authentication."""
+    # Check authentication via header
+    auth_header = request.headers.get("X-Access-Key")
+    if not auth_header or auth_header != USER_NS_KEY:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    
     try:
         stats = index_new_files()
         return {

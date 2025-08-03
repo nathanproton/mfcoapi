@@ -48,13 +48,150 @@
         /* Clickable row styles */
         tr.click-row { transition: background-color 0.15s ease-in-out; }
         tr.click-row:hover { background-color: #e3f2fd; cursor: pointer; }
+
+        /* Access Key Dropdown Styles */
+        .access-key-container {
+            position: relative;
+            display: inline-block;
+        }
+
+        .access-key-trigger {
+            font-family: 'TX02', sans-serif;
+            background-color: #104BC4;
+            color: white;
+            border: none;
+            border-radius: 0;
+            padding: 8px 12px;
+            cursor: pointer;
+            font-size: 16px;
+            line-height: 1;
+        }
+
+        .access-key-trigger:hover {
+            opacity: 0.9;
+        }
+
+        .access-key-dropdown {
+            position: absolute;
+            top: 100%;
+            right: 0;
+            background-color: black;
+            border-radius: 0;
+            padding: 8px;
+            display: none;
+            z-index: 1000;
+            min-width: 200px;
+        }
+
+        .access-key-dropdown.show {
+            display: flex;
+            align-items: center;
+            gap: 0;
+        }
+
+        .access-key-input {
+            font-family: 'TX02', sans-serif;
+            background-color: white;
+            color: black;
+            border: none;
+            border-radius: 0;
+            padding: 6px 8px;
+            flex: 1;
+            font-size: 14px;
+        }
+
+        .access-key-input::placeholder {
+            color: #999;
+            font-family: 'TX02', sans-serif;
+        }
+
+        .access-key-input:focus {
+            outline: none;
+        }
+
+        .access-key-submit {
+            font-family: 'TX02', sans-serif;
+            background-color: #104BC4;
+            color: white;
+            border: none;
+            border-radius: 0;
+            padding: 6px 10px;
+            cursor: pointer;
+            font-size: 14px;
+            line-height: 1;
+            margin-left: 2px;
+        }
+
+        .access-key-submit:hover {
+            opacity: 0.9;
+        }
+
+        /* Logout Icon */
+        .logout-icon {
+            font-family: 'TX02', sans-serif;
+            background-color: #104BC4;
+            color: white;
+            border: none;
+            border-radius: 0;
+            padding: 8px 12px;
+            cursor: pointer;
+            font-size: 16px;
+            line-height: 1;
+        }
+
+        .logout-icon:hover {
+            opacity: 0.9;
+        }
+
+        /* Authentication Bar */
+        .auth-bar {
+            background-color: #104BC4;
+            width: 100%;
+            padding: 8px 0;
+            border-bottom: 1px solid #0d3a9e;
+        }
+
+        .auth-link {
+            font-family: 'TX02', sans-serif;
+            color: white;
+            text-decoration: underline;
+            font-size: 14px;
+        }
+
+        .auth-link:hover {
+            color: #e0e0e0;
+        }
     </style>
 </head>
 <body>
     <header class="topbar">
-        <h1>LONGLINES</h1>
-        <h2>MORNINGSIDE FOUNDRY CO.</h2>
+        <div style="position: relative; display: flex; justify-content: center; align-items: center;">
+            <div style="flex: 1;"></div>
+            <div style="text-align: center;">
+                <h1>LONGLINES</h1>
+                <h2>MORNINGSIDE FOUNDRY CO.</h2>
+            </div>
+            <div style="flex: 1; display: flex; justify-content: flex-end; align-items: center; gap: 10px;">
+                <div class="access-key-container">
+                    <button class="access-key-trigger" onclick="toggleAccessKeyDropdown()">&#xE0A0;</button>
+                    <div class="access-key-dropdown" id="accessKeyDropdown">
+                        <input type="text" class="access-key-input" id="accessKeyInput" placeholder="ACCESS KEY" onkeypress="handleAccessKeyEnter(event)">
+                        <button class="access-key-submit" onclick="submitAccessKey()">&#x002D;</button>
+                    </div>
+                </div>
+                <button class="logout-icon" id="logoutIcon" onclick="logout()" style="display: none;">&#x2716;</button>
+            </div>
+        </div>
     </header>
+    
+    <!-- Authentication Bar (shown when authenticated) -->
+    <div class="auth-bar" id="authBar" style="display: none;">
+        <div style="display: flex; justify-content: flex-end; align-items: center; gap: 20px; padding-right: 2rem;">
+            <a href="#" class="auth-link" onclick="openTreeView(event)">tree</a>
+            <a href="#" class="auth-link" onclick="triggerManualIndex(event)">index</a>
+            <a href="#" class="auth-link" onclick="logout(event)">sign-out</a>
+        </div>
+    </div>
     <main>
 
         <!-- Breadcrumbs -->
@@ -158,6 +295,246 @@
         // Make sure the function is globally available
         window.copyPermanentURI = copyPermanentURI;
 
+        // Access Key Dropdown Functions
+        function toggleAccessKeyDropdown() {
+            const dropdown = document.getElementById('accessKeyDropdown');
+            const isShowing = dropdown.classList.contains('show');
+            
+            if (isShowing) {
+                dropdown.classList.remove('show');
+            } else {
+                dropdown.classList.add('show');
+                // Focus the input when dropdown opens
+                setTimeout(() => {
+                    document.getElementById('accessKeyInput').focus();
+                }, 10);
+            }
+        }
+
+        function handleAccessKeyEnter(event) {
+            if (event.key === 'Enter') {
+                submitAccessKey();
+            }
+        }
+
+        async function submitAccessKey() {
+            const input = document.getElementById('accessKeyInput');
+            const accessKey = input.value.trim();
+            
+            if (!accessKey) {
+                alert('Please enter an access key');
+                return;
+            }
+            
+            try {
+                const response = await fetch('/api/validate-access-key', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ access_key: accessKey })
+                });
+                
+                const result = await response.json();
+                
+                if (result.valid) {
+                    // Store authentication with 30-minute expiry
+                    const authData = {
+                        authenticated: true,
+                        accessKey: accessKey, // Store for API calls
+                        timestamp: Date.now(),
+                        expiresAt: Date.now() + (30 * 60 * 1000) // 30 minutes
+                    };
+                    sessionStorage.setItem('nsAuth', JSON.stringify(authData));
+                    
+                    // Clear input and hide dropdown
+                    input.value = '';
+                    document.getElementById('accessKeyDropdown').classList.remove('show');
+                    
+                    // Update UI
+                    updateAuthenticationUI();
+                    
+                    console.log('Authentication successful');
+                } else {
+                    alert('Invalid access key');
+                    input.select();
+                }
+            } catch (error) {
+                console.error('Authentication error:', error);
+                alert('Authentication failed. Please try again.');
+            }
+        }
+
+        // Authentication Management Functions
+        function isAuthenticated() {
+            const authData = sessionStorage.getItem('nsAuth');
+            if (!authData) return false;
+            
+            try {
+                const parsed = JSON.parse(authData);
+                const now = Date.now();
+                
+                if (now > parsed.expiresAt) {
+                    // Authentication expired
+                    sessionStorage.removeItem('nsAuth');
+                    return false;
+                }
+                
+                return parsed.authenticated;
+            } catch (error) {
+                sessionStorage.removeItem('nsAuth');
+                return false;
+            }
+        }
+
+        function getAccessKey() {
+            const authData = sessionStorage.getItem('nsAuth');
+            if (!authData) return null;
+            
+            try {
+                const parsed = JSON.parse(authData);
+                const now = Date.now();
+                
+                if (now > parsed.expiresAt) {
+                    // Authentication expired
+                    sessionStorage.removeItem('nsAuth');
+                    return null;
+                }
+                
+                return parsed.accessKey;
+            } catch (error) {
+                sessionStorage.removeItem('nsAuth');
+                return null;
+            }
+        }
+
+        function updateAuthenticationUI() {
+            const isAuth = isAuthenticated();
+            const authBar = document.getElementById('authBar');
+            const logoutIcon = document.getElementById('logoutIcon');
+            const accessKeyTrigger = document.querySelector('.access-key-trigger');
+            
+            if (isAuth) {
+                authBar.style.display = 'block';
+                logoutIcon.style.display = 'block';
+                accessKeyTrigger.style.display = 'none';
+            } else {
+                authBar.style.display = 'none';
+                logoutIcon.style.display = 'none';
+                accessKeyTrigger.style.display = 'block';
+            }
+        }
+
+        function logout(event) {
+            if (event) event.preventDefault();
+            
+            sessionStorage.removeItem('nsAuth');
+            updateAuthenticationUI();
+            
+            // Hide dropdown if open
+            document.getElementById('accessKeyDropdown').classList.remove('show');
+            
+            console.log('Logged out successfully');
+        }
+
+        function openTreeView(event) {
+            if (event) event.preventDefault();
+            
+            if (!isAuthenticated()) {
+                alert('Please authenticate first');
+                return;
+            }
+            
+            const accessKey = getAccessKey();
+            if (!accessKey) {
+                alert('Authentication expired. Please log in again.');
+                updateAuthenticationUI();
+                return;
+            }
+            
+            // Get current path from URL for tree view context
+            const currentPath = window.location.pathname.replace('/browse/', '');
+            const baseUrl = currentPath ? `/tree/${currentPath}` : '/tree';
+            
+            // Add access key as query parameter for new tab authentication
+            const treeUrl = `${baseUrl}?access_key=${encodeURIComponent(accessKey)}`;
+            
+            window.open(treeUrl, '_blank');
+        }
+
+        async function triggerManualIndex(event) {
+            if (event) event.preventDefault();
+            
+            if (!isAuthenticated()) {
+                alert('Please authenticate first');
+                return;
+            }
+            
+            const accessKey = getAccessKey();
+            if (!accessKey) {
+                alert('Authentication expired. Please log in again.');
+                updateAuthenticationUI();
+                return;
+            }
+            
+            // Show loading state
+            const originalText = event.target.textContent;
+            event.target.textContent = 'indexing...';
+            event.target.style.color = '#ccc';
+            
+            try {
+                const response = await fetch('/index-new', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-Access-Key': accessKey
+                    }
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    // Show success feedback
+                    event.target.textContent = 'indexed!';
+                    event.target.style.color = '#4caf50';
+                    
+                    // Show detailed results in console
+                    console.log('Manual indexing completed:', result);
+                    
+                    // Optional: Show alert with results
+                    if (result.stats && result.stats.new_uris_added > 0) {
+                        setTimeout(() => {
+                            alert(`Indexing completed! Added ${result.stats.new_uris_added} new URI mappings.`);
+                        }, 500);
+                    }
+                } else {
+                    throw new Error(result.message || 'Indexing failed');
+                }
+            } catch (error) {
+                console.error('Manual indexing error:', error);
+                alert(`Indexing failed: ${error.message}`);
+                
+                event.target.textContent = 'error';
+                event.target.style.color = '#f44336';
+            }
+            
+            // Reset link after 3 seconds
+            setTimeout(() => {
+                event.target.textContent = originalText;
+                event.target.style.color = '';
+            }, 3000);
+        }
+
+        // Close dropdown when clicking outside
+        function handleClickOutside(event) {
+            const container = document.querySelector('.access-key-container');
+            const dropdown = document.getElementById('accessKeyDropdown');
+            
+            if (container && !container.contains(event.target) && dropdown.classList.contains('show')) {
+                dropdown.classList.remove('show');
+            }
+        }
+
         function hideDSStoreFiles() {
             // Find and hide any rows containing .ds-store files (case insensitive)
             document.querySelectorAll('tr').forEach(row => {
@@ -199,6 +576,8 @@
                         history.pushState(null, '', url);
                         attachRowHandlers();
                         hideDSStoreFiles();
+                        // Maintain authentication UI state after navigation
+                        updateAuthenticationUI();
                     }
                 })
                 .catch(console.error);
@@ -207,6 +586,18 @@
         document.addEventListener('DOMContentLoaded', () => {
             attachRowHandlers();
             hideDSStoreFiles();
+            
+            // Initialize authentication UI
+            updateAuthenticationUI();
+            
+            // Check authentication status periodically (every minute)
+            setInterval(() => {
+                updateAuthenticationUI();
+            }, 60000);
+            
+            // Add click outside handler for access key dropdown
+            document.addEventListener('click', handleClickOutside);
+            
             // Intercept breadcrumb link clicks
             document.addEventListener('click', (e) => {
                 const anchor = e.target.closest('a');
