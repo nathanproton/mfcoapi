@@ -260,20 +260,58 @@ async def browse(request: Request, prefix: str = ""):
 @app.get("/sign-url/{key:path}")
 async def sign_url(key: str, expires_in: int = 3600):
     try:
-        url = s3.generate_presigned_url(
+        # Generate the signed URL for DigitalOcean Spaces
+        signed_url = s3.generate_presigned_url(
             ClientMethod="get_object",
             Params={"Bucket": DO_BUCKET, "Key": key},
             ExpiresIn=expires_in,
         )
+        
+        # URL encode the signed URL to pass as a parameter to the worker
+        from urllib.parse import quote
+        encoded_signed_url = quote(signed_url, safe='')
+        
+        # Pass the signed URL to the worker as a query parameter
+        worker_url = f"https://signed.mfcoapi.com/{key}?signed_url={encoded_signed_url}"
+        
+        logger.info(f"Generated worker download URL for {key}: {worker_url}")
+        
     except Exception as e:
         logger.exception("Failed generating presigned URL for %s", key)
         raise HTTPException(status_code=500, detail="Failed to generate presigned URL") from e
-    return RedirectResponse(url)
+    return RedirectResponse(worker_url)
+
+
+@app.get("/new-url/{key:path}")
+async def new_signed_url(key: str, expires_in: int = 3600):
+    """Generate a URL using the Cloudflare worker domain with signed URL parameter."""
+    try:
+        # Generate the signed URL for DigitalOcean Spaces
+        signed_url = s3.generate_presigned_url(
+            ClientMethod="get_object",
+            Params={"Bucket": DO_BUCKET, "Key": key},
+            ExpiresIn=expires_in,
+        )
+        
+        # URL encode the signed URL to pass as a parameter to the worker
+        from urllib.parse import quote
+        encoded_signed_url = quote(signed_url, safe='')
+        
+        # Pass the signed URL to the worker as a query parameter
+        worker_url = f"https://signed.mfcoapi.com/{key}?signed_url={encoded_signed_url}"
+        
+        logger.info(f"Generated worker URL for {key}: {worker_url}")
+        
+    except Exception as e:
+        logger.exception("Failed generating worker URL for %s", key)
+        raise HTTPException(status_code=500, detail="Failed to generate worker URL") from e
+    
+    return RedirectResponse(worker_url)
 
 
 @app.get("/file/{uri_id}")
 async def get_file_by_permanent_uri(uri_id: str, expires_in: int = 3600):
-    """Serve a file by its URI ID."""
+    """Serve a file by its URI ID using the Cloudflare worker."""
     uri_map = load_uri_map()
     
     if uri_id not in uri_map:
@@ -285,13 +323,23 @@ async def get_file_by_permanent_uri(uri_id: str, expires_in: int = 3600):
         # Check if file still exists
         s3.head_object(Bucket=DO_BUCKET, Key=s3_key)
         
-        # Generate presigned URL and redirect
-        url = s3.generate_presigned_url(
+        # Generate the signed URL for DigitalOcean Spaces
+        signed_url = s3.generate_presigned_url(
             ClientMethod="get_object",
             Params={"Bucket": DO_BUCKET, "Key": s3_key},
             ExpiresIn=expires_in,
         )
-        return RedirectResponse(url)
+        
+        # URL encode the signed URL to pass as a parameter to the worker
+        from urllib.parse import quote
+        encoded_signed_url = quote(signed_url, safe='')
+        
+        # Pass the signed URL to the worker as a query parameter
+        worker_url = f"https://signed.mfcoapi.com/{s3_key}?signed_url={encoded_signed_url}"
+        
+        logger.info(f"Generated worker URI redirect for {uri_id} -> {s3_key}: {worker_url}")
+        
+        return RedirectResponse(worker_url)
     except s3.exceptions.NoSuchKey:
         # File no longer exists, remove from mapping
         uri_map = load_uri_map()
@@ -300,8 +348,8 @@ async def get_file_by_permanent_uri(uri_id: str, expires_in: int = 3600):
             save_uri_map(uri_map)
         raise HTTPException(status_code=404, detail="File no longer exists")
     except Exception as e:
-        logger.exception("Failed generating presigned URL for URI %s -> %s", uri_id, s3_key)
-        raise HTTPException(status_code=500, detail="Failed to generate presigned URL") from e
+        logger.exception("Failed generating worker URL for URI %s -> %s", uri_id, s3_key)
+        raise HTTPException(status_code=500, detail="Failed to generate worker URL") from e
 
 
 @app.post("/api/validate-access-key")
